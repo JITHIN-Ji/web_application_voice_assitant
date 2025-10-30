@@ -1,0 +1,12 @@
+deepgram-sdk==4.7.0
+pydub
+google-generativeai
+langchain-google-genai
+python-dotenv
+pandas
+sendgrid
+openpyxl
+streamlit
+fastapi
+uvicorn[standard]
+python-multipart
