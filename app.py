@@ -17,6 +17,8 @@ import logging
 from pipeline.core import MedicalAudioProcessor
 from agent.config import set_session_id, logger, GEMINI_API_KEY
 from agent.core import process_appointment
+from user.chat_service import process_user_question
+from database.patient_db import create_patient, get_all_patients, get_patient_by_token
 
 # Load environment variables
 load_dotenv()
@@ -143,6 +145,7 @@ async def approve_plan_api(payload: dict):
     plan_section = payload.get('plan_section')
     user_email = payload.get('user_email', 'default_patient@example.com') # Fallback email
     send_email = bool(payload.get('send_email', True))
+    custom_email_content = payload.get('email_content')  # Doctor's edited email content
 
     if not plan_section or plan_section.strip().lower() == "n/a":
         logger.warning(f"[{session_id}] No valid plan section provided for approval.")
@@ -165,8 +168,12 @@ async def approve_plan_api(payload: dict):
         if appointment_preview_res["status"] == "success" and "email_content" in appointment_preview_res:
             if send_email:
                 # If email content was generated and sending requested, now actually send it
-                logger.info(f"[{session_id}] Sending appointment email...")
-                appointment_send_res = process_appointment(plan_section, user_email, send_email=True)
+                # Use custom email content if provided (doctor's edited version)
+                if custom_email_content:
+                    logger.info(f"[{session_id}] Sending appointment email with custom (edited) content...")
+                else:
+                    logger.info(f"[{session_id}] Sending appointment email...")
+                appointment_send_res = process_appointment(plan_section, user_email, send_email=True, custom_email_content=custom_email_content)
                 results['appointment_sending'] = appointment_send_res
                 if appointment_send_res["status"] == "success":
                     logger.info(f"[{session_id}] ✅ Appointment email sent to {user_email}.")
@@ -190,3 +197,187 @@ async def approve_plan_api(payload: dict):
     except Exception as e:
         logger.error(f"[{session_id}] Error during plan approval: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Server error during plan approval: {str(e)}")
+
+
+@app.post("/user_chat")
+async def user_chat_api(payload: dict):
+    """
+    Handle user questions about their SOAP summary.
+    Uses Gemini to determine if question is related to SOAP summary and answers accordingly.
+    """
+    client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
+    session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
+    logger.info(f"[{session_id}] Received user chat request.")
+
+    question = payload.get('question', '').strip()
+    soap_summary = payload.get('soap_summary', {})
+
+    if not question:
+        logger.warning(f"[{session_id}] Empty question provided.")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Question cannot be empty.",
+                "answer": "Please provide a question."
+            },
+            status_code=400
+        )
+
+    if not soap_summary:
+        logger.warning(f"[{session_id}] No SOAP summary provided.")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "SOAP summary is required.",
+                "answer": "No SOAP summary available. Please visit the Doctor Portal to generate a summary."
+            },
+            status_code=400
+        )
+
+    try:
+        # Process the question using the chat service
+        result = process_user_question(question, soap_summary)
+        
+        logger.info(
+            f"[{session_id}] Question processed. "
+            f"Relevant: {result['is_relevant']}, "
+            f"Forwarded: {result.get('forwarded_to_doctor', False)}"
+        )
+        
+        return JSONResponse(
+            content={
+                "status": "success",
+                "is_relevant": result["is_relevant"],
+                "answer": result["answer"],
+                "forwarded_to_doctor": result.get("forwarded_to_doctor", False),
+                "message": "Question processed successfully."
+            },
+            status_code=200
+        )
+
+    except Exception as e:
+        logger.error(f"[{session_id}] Error processing user question: {e}", exc_info=True)
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "An error occurred while processing your question.",
+                "answer": "I apologize, but I'm having trouble processing your question right now. Please try again or contact your doctor directly."
+            },
+            status_code=500
+        )
+
+
+@app.post("/patients")
+async def create_patient_api(payload: dict):
+    """
+    Create a new patient record.
+    """
+    client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
+    session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
+    logger.info(f"[{session_id}] Received request to create patient.")
+
+    name = payload.get('name', '').strip()
+    address = payload.get('address', '').strip()
+    phone_number = payload.get('phone_number', '').strip()
+    problem = payload.get('problem', '').strip()
+
+    if not name:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Patient name is required."
+            },
+            status_code=400
+        )
+
+    try:
+        patient = create_patient(name, address, phone_number, problem)
+        logger.info(f"[{session_id}] Patient created: {patient['token_id']}")
+        
+        return JSONResponse(
+            content={
+                "status": "success",
+                "message": "Patient created successfully.",
+                "patient": patient
+            },
+            status_code=200
+        )
+    except Exception as e:
+        logger.error(f"[{session_id}] Error creating patient: {e}", exc_info=True)
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"Failed to create patient: {str(e)}"
+            },
+            status_code=500
+        )
+
+
+@app.get("/patients")
+async def get_patients_api(session_id: str = None):
+    """
+    Get all patients.
+    """
+    # Use provided session_id or generate new one
+    client_session_id = session_id
+    session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
+    logger.info(f"[{session_id}] Received request to get all patients.")
+
+    try:
+        patients = get_all_patients()
+        logger.info(f"[{session_id}] Retrieved {len(patients)} patients")
+        
+        return JSONResponse(
+            content={
+                "status": "success",
+                "patients": patients
+            },
+            status_code=200
+        )
+    except Exception as e:
+        logger.error(f"[{session_id}] Error getting patients: {e}", exc_info=True)
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"Failed to get patients: {str(e)}"
+            },
+            status_code=500
+        )
+
+
+@app.get("/patients/{token_id}")
+async def get_patient_api(token_id: str):
+    """
+    Get a patient by token ID.
+    """
+    session_id = set_session_id(str(uuid.uuid4())[:8])
+    logger.info(f"[{session_id}] Received request to get patient: {token_id}")
+
+    try:
+        patient = get_patient_by_token(token_id)
+        
+        if not patient:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "Patient not found."
+                },
+                status_code=404
+            )
+        
+        return JSONResponse(
+            content={
+                "status": "success",
+                "patient": patient
+            },
+            status_code=200
+        )
+    except Exception as e:
+        logger.error(f"[{session_id}] Error getting patient: {e}", exc_info=True)
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"Failed to get patient: {str(e)}"
+            },
+            status_code=500
+        )

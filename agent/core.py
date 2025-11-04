@@ -30,7 +30,7 @@ from agent.parser import parse_medicines_from_text
 #         return {"status": "error", "error": str(e)}
 
 
-def process_appointment(plan_section: str, user_email: str, send_email: bool = True) -> Dict[str, Any]:
+def process_appointment(plan_section: str, user_email: str, send_email: bool = True, custom_email_content: str = None) -> Dict[str, Any]:
     """
     Process appointment scheduling from the plan section.
     
@@ -38,6 +38,8 @@ def process_appointment(plan_section: str, user_email: str, send_email: bool = T
         plan_section: The plan section from SOAP summary
         user_email: Email address to send appointment to
         send_email: If False, only generates email content without sending
+        custom_email_content: Optional custom email content (from doctor's edits). 
+                              If provided and send_email=True, uses this instead of generating new content.
     
     Returns:
         dict with status, email_content (if send_email=False), result, and error (if any)
@@ -67,7 +69,9 @@ def process_appointment(plan_section: str, user_email: str, send_email: bool = T
                     }
                 
                 # Actually send the email
-                email_result = send_email_schedule(appointment_text, user_email)
+                # Use custom email content if provided (from doctor's edits), otherwise use generated content
+                content_to_send = custom_email_content if custom_email_content else email_content
+                email_result = send_email_schedule(appointment_text, user_email, email_content=content_to_send)
                 logger.info("📤 Email send attempted via SendGrid")
                 return {
                     "status": "success",

@@ -44,7 +44,7 @@ def save_medicine_to_excel(medicines: List[str], filename="medicine_plan.xlsx") 
     logger.info(f"✅ Saved {len(medicines)} medicines to {file_path}")
     return f"Saved {len(medicines)} medicine records to {file_path}"
 
-def send_email_schedule(details: str, user_email: str) -> str:
+def send_email_schedule(details: str, user_email: str, email_content: str = None) -> str:
     print(f"[DEBUG] EMAIL_ENABLED: {EMAIL_ENABLED}")
     print(f"[DEBUG] SENDGRID_API_KEY present: {bool(SENDGRID_API_KEY)}")
     
@@ -56,11 +56,14 @@ def send_email_schedule(details: str, user_email: str) -> str:
         logger.error("SendGrid API key not set.")
         print("[DEBUG] SendGrid API key not set.")
         return "Email service not configured."
+    # Use custom email content if provided, otherwise use details
+    content_to_send = email_content if email_content else details
+    
     message = Mail(
         from_email='jithinjithuedpl922@gmail.com',  # Use your verified sender
         to_emails=user_email,
         subject='Appointment Schedule',
-        plain_text_content=details
+        plain_text_content=content_to_send
     )
     try:
         sg = SendGridAPIClient(SENDGRID_API_KEY)
