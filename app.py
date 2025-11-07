@@ -68,7 +68,8 @@ async def root():
 @app.post("/process_audio")
 async def process_audio_api(
     audio: UploadFile = File(...),
-    session_id: str = Form(None)
+    session_id: str = Form(None),
+    is_realtime: str = Form(None)  # "true" or "false" string to indicate Option 1 (real-time)
 ):
     """
     Processes an uploaded audio file to generate a medical transcript and SOAP summary.
@@ -101,8 +102,19 @@ async def process_audio_api(
             raise HTTPException(status_code=500, detail="Failed to transcribe audio.")
         logger.info(f"[{session_id}] ✅ Transcription completed. Transcript length: {len(transcript)} chars")
 
+        # Check if this is Option 1 (real-time) - apply transcript correction
+        corrected_transcript = transcript
+        is_realtime_flag = is_realtime and is_realtime.lower() == "true"
+        
+        if is_realtime_flag:
+            logger.info(f"[{session_id}] 🔧 Option 1 detected: Correcting transcript labels with Gemini...")
+            corrected_transcript = processor.correct_transcript(transcript)
+            logger.info(f"[{session_id}] ✅ Transcript labels corrected. Using corrected transcript for SOAP generation.")
+        else:
+            logger.info(f"[{session_id}] Option 2 detected: Skipping transcript correction.")
+
         logger.info(f"[{session_id}] 🤖 Passing transcript to Gemini for SOAP creation...")
-        gemini_summary_raw = processor.query_gemini(transcript)
+        gemini_summary_raw = processor.query_gemini(corrected_transcript)
         
         if not gemini_summary_raw:
             logger.error(f"[{session_id}] Gemini summary generation failed for {audio.filename}.")
@@ -112,7 +124,8 @@ async def process_audio_api(
         logger.info(f"[{session_id}] 🧴 SOAP sections created: {list(soap_sections.keys()) if isinstance(soap_sections, dict) else 'unknown'}")
 
         response_data = {
-            "transcript": transcript,
+            "transcript": corrected_transcript,  # Return corrected transcript for Option 1, original for Option 2
+            "original_transcript": transcript if is_realtime_flag else None,  # Include original for Option 1
             "diarized_segments": diarized_segments,
             "soap_sections": soap_sections,
             "audio_file_name": audio.filename

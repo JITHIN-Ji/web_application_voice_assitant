@@ -12,6 +12,28 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 gemini_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
 
 
+TRANSCRIPT_CORRECTION_PROMPT = """
+You are a medical conversation analysis assistant. Your task is to analyze a doctor-patient conversation transcript and correctly label who said what.
+
+The transcript may have incorrect speaker labels from the speech-to-text system. You need to:
+1. Analyze the content and context of each statement
+2. Correctly identify which statements were made by the Doctor and which by the Patient
+3. Return the corrected transcript with proper labels
+
+CRITICAL RULES:
+1. Return ONLY the corrected transcript in the same format as input (e.g., "Doctor: ..." or "Patient: ...")
+2. Do NOT add any explanations, comments, or extra text
+3. Do NOT change the actual spoken words, only correct the speaker labels
+4. Maintain the original structure and line breaks
+5. Doctor statements typically include: medical advice, prescriptions, diagnoses, treatment plans, questions about symptoms
+6. Patient statements typically include: describing symptoms, asking questions, expressing concerns, personal experiences
+
+Input transcript:
+{transcript}
+
+Output (corrected transcript only, same format):
+"""
+
 MEDICAL_DIALOGUE_PROMPT_JSON = """
 You are a precise medical dialogue extraction assistant.
 Extract clinical information from the transcript using SOAP method.
@@ -29,6 +51,35 @@ Now extract information from ONLY this transcript:
 
 Output (strict JSON only, no extra text):
 """
+
+def correct_transcript_labels(transcript: str) -> str:
+    """Send transcript to Gemini model to correct speaker labels (Doctor vs Patient)."""
+    prompt = TRANSCRIPT_CORRECTION_PROMPT.format(transcript=transcript)
+    logger.info(f"🤖 Gemini: Correcting transcript labels (chars={len(transcript)})")
+    logger.debug(f"Prompt sent to Gemini for correction: {prompt}")
+    try:
+        response = gemini_model.generate_content(prompt)
+        text = response.text.strip() if response and response.text else ""
+        logger.debug(f"Raw response from Gemini (correction): {text}")
+        
+        # Remove code block markers if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        
+        if text:
+            logger.info("🤖 Gemini: Transcript labels corrected successfully.")
+            return text
+        else:
+            logger.warning("Empty response from Gemini for transcript correction, returning original.")
+            return transcript
+    except Exception as e:
+        logger.error(f"Gemini transcript correction failed: {e}")
+        return transcript  # Return original transcript on error
 
 def query_gemini_summary(transcript: str) -> dict:
     """Send transcript to Gemini model and return structured JSON."""

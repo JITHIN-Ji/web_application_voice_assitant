@@ -3,7 +3,7 @@ import logging
 from typing import List, Tuple, Dict, Optional
 from pipeline.audio_utils import ensure_wav, transcribe_with_deepgram
 
-from pipeline.gemini_llm import query_gemini_summary
+from pipeline.gemini_llm import query_gemini_summary, correct_transcript_labels
 
 
 class MedicalAudioProcessor:
@@ -19,3 +19,6 @@ class MedicalAudioProcessor:
 
     def query_gemini(self, transcript: str) -> str:
         return query_gemini_summary(transcript)
+    
+    def correct_transcript(self, transcript: str) -> str:
+        return correct_transcript_labels(transcript)
