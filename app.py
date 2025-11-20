@@ -1,9 +1,8 @@
-
-
 import os
 import json
 import uuid
 import tempfile
+import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +72,9 @@ async def process_audio_api(
     """
     Processes an uploaded audio file to generate a medical transcript and SOAP summary.
     """
+    # Track overall timing
+    overall_start = time.time()
+    
     # Use provided session_id if available, else generate a new one
     session_id = set_session_id(session_id or str(uuid.uuid4())[:8])
     logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}")
@@ -81,53 +83,79 @@ async def process_audio_api(
         logger.error(f"[{session_id}] No audio file provided.")
         raise HTTPException(status_code=400, detail="No audio file provided.")
 
-    # Save the uploaded file temporarily
-    # Using tempfile for better cleanup, though in this example, UPLOAD_FOLDER is still used for processor context
-    # It's good practice to save to a known location, and then use processor logic.
+    
     try:
         # Create a temporary file to save the uploaded audio
+        file_save_start = time.time()
         with tempfile.NamedTemporaryFile(delete=False, dir=UPLOAD_FOLDER, suffix=os.path.splitext(audio.filename)[1]) as temp_audio_file:
             contents = await audio.read()
             temp_audio_file.write(contents)
             filepath = temp_audio_file.name
-        logger.info(f"[{session_id}] Audio file saved to {filepath}")
+        file_save_time = time.time() - file_save_start
+        logger.info(f"[{session_id}] 📁 Audio file saved to {filepath} (Time: {file_save_time:.2f}s)")
 
         # Transcribe with Deepgram directly (no WAV conversion to avoid large uploads)
         logger.info(f"[{session_id}] 🎙️ Starting transcription with Deepgram...")
+        transcription_start = time.time()
         transcript, diarized_segments = processor.transcribe_file(filepath)
+        transcription_time = time.time() - transcription_start
         
         if not transcript:
             logger.error(f"[{session_id}] Transcription failed for {audio.filename}.")
             raise HTTPException(status_code=500, detail="Failed to transcribe audio.")
-        logger.info(f"[{session_id}] ✅ Transcription completed. Transcript length: {len(transcript)} chars")
+        logger.info(f"[{session_id}] ✅ Transcription completed. Transcript length: {len(transcript)} chars (Time: {transcription_time:.2f}s)")
 
-        # Check if this is Option 1 (real-time) - apply transcript correction
+        
         corrected_transcript = transcript
         is_realtime_flag = is_realtime and is_realtime.lower() == "true"
+        correction_time = 0
         
         if is_realtime_flag:
             logger.info(f"[{session_id}] 🔧 Option 1 detected: Correcting transcript labels with Gemini...")
+            correction_start = time.time()
             corrected_transcript = processor.correct_transcript(transcript)
-            logger.info(f"[{session_id}] ✅ Transcript labels corrected. Using corrected transcript for SOAP generation.")
+            correction_time = time.time() - correction_start
+            logger.info(f"[{session_id}] ✅ Transcript labels corrected. Using corrected transcript for SOAP generation. (Time: {correction_time:.2f}s)")
         else:
             logger.info(f"[{session_id}] Option 2 detected: Skipping transcript correction.")
 
         logger.info(f"[{session_id}] 🤖 Passing transcript to Gemini for SOAP creation...")
+        soap_start = time.time()
         gemini_summary_raw = processor.query_gemini(corrected_transcript)
+        soap_time = time.time() - soap_start
         
         if not gemini_summary_raw:
             logger.error(f"[{session_id}] Gemini summary generation failed for {audio.filename}.")
             raise HTTPException(status_code=500, detail="Failed to generate summary.")
 
         soap_sections = gemini_summary_raw
-        logger.info(f"[{session_id}] 🧴 SOAP sections created: {list(soap_sections.keys()) if isinstance(soap_sections, dict) else 'unknown'}")
+        logger.info(f"[{session_id}] 🧴 SOAP sections created: {list(soap_sections.keys()) if isinstance(soap_sections, dict) else 'unknown'} (Time: {soap_time:.2f}s)")
+
+        # Calculate total time
+        total_time = time.time() - overall_start
+        
+        # Log timing summary
+        logger.info(f"[{session_id}] ⏱️ TIMING SUMMARY:")
+        logger.info(f"[{session_id}]   • File Save: {file_save_time:.2f}s")
+        logger.info(f"[{session_id}]   • Deepgram Transcription: {transcription_time:.2f}s")
+        if is_realtime_flag:
+            logger.info(f"[{session_id}]   • Gemini Label Correction: {correction_time:.2f}s")
+        logger.info(f"[{session_id}]   • Gemini SOAP Creation: {soap_time:.2f}s")
+        logger.info(f"[{session_id}]   • TOTAL TIME: {total_time:.2f}s")
 
         response_data = {
             "transcript": corrected_transcript,  # Return corrected transcript for Option 1, original for Option 2
             "original_transcript": transcript if is_realtime_flag else None,  # Include original for Option 1
             "diarized_segments": diarized_segments,
             "soap_sections": soap_sections,
-            "audio_file_name": audio.filename
+            "audio_file_name": audio.filename,
+            "timing": {
+                "file_save_time": round(file_save_time, 2),
+                "transcription_time": round(transcription_time, 2),
+                "correction_time": round(correction_time, 2) if is_realtime_flag else 0,
+                "soap_generation_time": round(soap_time, 2),
+                "total_time": round(total_time, 2)
+            }
         }
         
         logger.info(f"[{session_id}] ⏹️ Process audio END. Success; sending response.")
@@ -149,6 +177,9 @@ async def approve_plan_api(payload: dict):
     Approves the extracted medical plan and executes agent actions
     like processing medicines and scheduling appointments.
     """
+    # Track timing
+    overall_start = time.time()
+    
     # Reuse client-provided session_id if present to correlate logs across requests
     client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
     session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
@@ -172,10 +203,13 @@ async def approve_plan_api(payload: dict):
 
         # Process Appointment - Generate content first (send_email flag controls sending)
         logger.info(f"[{session_id}] Generating appointment email content...")
+        preview_start = time.time()
         appointment_preview_res = process_appointment(plan_section, user_email, send_email=False)
+        preview_time = time.time() - preview_start
         results['appointment_preview'] = appointment_preview_res
+        
         if appointment_preview_res.get("status") == "success":
-            logger.info(f"[{session_id}] 📧 Email preview generated for doctor approval.")
+            logger.info(f"[{session_id}] 📧 Email preview generated for doctor approval. (Time: {preview_time:.2f}s)")
 
         if appointment_preview_res["status"] == "success" and "email_content" in appointment_preview_res:
             if send_email:
@@ -185,11 +219,22 @@ async def approve_plan_api(payload: dict):
                     logger.info(f"[{session_id}] Sending appointment email with custom (edited) content...")
                 else:
                     logger.info(f"[{session_id}] Sending appointment email...")
+                
+                send_start = time.time()
                 appointment_send_res = process_appointment(plan_section, user_email, send_email=True, custom_email_content=custom_email_content)
+                send_time = time.time() - send_start
                 results['appointment_sending'] = appointment_send_res
+                
                 if appointment_send_res["status"] == "success":
-                    logger.info(f"[{session_id}] ✅ Appointment email sent to {user_email}.")
+                    logger.info(f"[{session_id}] ✅ Appointment email sent to {user_email}. (Time: {send_time:.2f}s)")
                     results['message'] = "Plan approved and actions executed (including appointment email)."
+                    
+                    total_time = time.time() - overall_start
+                    logger.info(f"[{session_id}] ⏱️ TIMING SUMMARY:")
+                    logger.info(f"[{session_id}]   • Email Preview Generation: {preview_time:.2f}s")
+                    logger.info(f"[{session_id}]   • Email Sending: {send_time:.2f}s")
+                    logger.info(f"[{session_id}]   • TOTAL TIME: {total_time:.2f}s")
+                    
                     logger.info(f"[{session_id}] Plan approved and actions executed successfully.")
                     return JSONResponse(content=results, status_code=200)
                 else:
@@ -199,7 +244,8 @@ async def approve_plan_api(payload: dict):
                     return JSONResponse(content=results, status_code=200)
             else:
                 results['message'] = "Plan approved. Email content generated for review; sending not requested."
-                logger.info(f"[{session_id}] Plan approved; email content generated, not sent.")
+                total_time = time.time() - overall_start
+                logger.info(f"[{session_id}] Plan approved; email content generated, not sent. (Total Time: {total_time:.2f}s)")
                 return JSONResponse(content=results, status_code=200)
         else:
             results['message'] = "Plan approved, but no appointment found or email generation failed."
@@ -217,6 +263,8 @@ async def user_chat_api(payload: dict):
     Handle user questions about their SOAP summary.
     Uses Gemini to determine if question is related to SOAP summary and answers accordingly.
     """
+    chat_start = time.time()
+    
     client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
     session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
     logger.info(f"[{session_id}] Received user chat request.")
@@ -248,12 +296,16 @@ async def user_chat_api(payload: dict):
 
     try:
         # Process the question using the chat service
+        processing_start = time.time()
         result = process_user_question(question, soap_summary)
+        processing_time = time.time() - processing_start
+        total_time = time.time() - chat_start
         
         logger.info(
             f"[{session_id}] Question processed. "
             f"Relevant: {result['is_relevant']}, "
-            f"Forwarded: {result.get('forwarded_to_doctor', False)}"
+            f"Forwarded: {result.get('forwarded_to_doctor', False)} "
+            f"(Processing Time: {processing_time:.2f}s, Total Time: {total_time:.2f}s)"
         )
         
         return JSONResponse(
@@ -262,7 +314,11 @@ async def user_chat_api(payload: dict):
                 "is_relevant": result["is_relevant"],
                 "answer": result["answer"],
                 "forwarded_to_doctor": result.get("forwarded_to_doctor", False),
-                "message": "Question processed successfully."
+                "message": "Question processed successfully.",
+                "timing": {
+                    "processing_time": round(processing_time, 2),
+                    "total_time": round(total_time, 2)
+                }
             },
             status_code=200
         )
