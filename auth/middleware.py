@@ -1,11 +1,13 @@
-from fastapi import Request, HTTPException, status
+from fastapi import Request, HTTPException, status, Depends 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .google_auth import verify_jwt_token
 from typing import Optional
 
 security = HTTPBearer()
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = security) -> dict:
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)  
+) -> dict:
     """Dependency to get current authenticated user from JWT token."""
     token = credentials.credentials
     user_data = verify_jwt_token(token)
