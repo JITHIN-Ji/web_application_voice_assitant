@@ -1,6 +1,7 @@
 
 import os
 import logging
+import time
 from typing import Optional, List, Dict, Any, Tuple
 from agent.config import logger, DEEPGRAM_API_KEY
 from deepgram import DeepgramClient
@@ -38,12 +39,19 @@ def transcribe_with_deepgram(audio_path: str, diarize: bool = True, language: st
         logger.error("Deepgram API key not configured. Set DEEPGRAM_API_KEY in environment.")
         return "", []
     try:
+        # Create client with standard initialization
         client = DeepgramClient(DEEPGRAM_API_KEY)
         with open(audio_path, "rb") as f:
             buffer = f.read()
+        
+        # Log file size for debugging
+        file_size_mb = len(buffer) / (1024 * 1024)
+        if file_size_mb > 25:
+            logger.warning(f"Large audio file detected: {file_size_mb:.2f}MB. Deepgram max is ~25MB.")
+        
         source = {"buffer": buffer}
 
-        dg_model = os.getenv("DEEPGRAM_MODEL", "nova-2-general")
+        dg_model = os.getenv("DEEPGRAM_MODEL", "nova-3-medical")
         speaker_count_env = os.getenv("DEEPGRAM_SPEAKER_COUNT")
         diarize_speaker_count: Optional[int] = None
         try:
@@ -64,7 +72,22 @@ def transcribe_with_deepgram(audio_path: str, diarize: bool = True, language: st
             options["diarize_speaker_count"] = diarize_speaker_count
 
         logger.info(f"Transcribing with Deepgram (diarize={diarize}) -> {os.path.basename(audio_path)}")
-        response = client.listen.prerecorded.v("1").transcribe_file(source, options)
+        
+        # Retry logic with exponential backoff
+        max_retries = 3
+        retry_delay = 2  # Start with 2 seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = client.listen.prerecorded.v("1").transcribe_file(source, options)
+                break  # Success, exit retry loop
+            except Exception as retry_err:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Transcription attempt {attempt + 1} failed: {retry_err}. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise  # Re-raise on final attempt
         try:
             data = response.to_dict()
         except Exception:
