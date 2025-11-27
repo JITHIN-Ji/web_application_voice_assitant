@@ -16,7 +16,7 @@ from pipeline.core import MedicalAudioProcessor
 from agent.config import set_session_id, logger, GEMINI_API_KEY
 from agent.core import process_appointment
 from user.chat_service import process_user_question
-from database.patient_db import create_patient, get_all_patients, get_patient_by_token
+from database.patient_db import create_patient, get_all_patients, get_patient_by_token, save_soap_record, get_patient_soap_records, get_voice_recordings
 
 # Load environment variables
 load_dotenv()
@@ -67,17 +67,19 @@ async def root():
 async def process_audio_api(
     audio: UploadFile = File(...),
     session_id: str = Form(None),
-    is_realtime: str = Form(None)  # "true" or "false" string to indicate Option 1 (real-time)
+    is_realtime: str = Form(None), 
+    patient_token_id: str = Form(None)  
 ):
     """
     Processes an uploaded audio file to generate a medical transcript and SOAP summary.
+    If patient_token_id is provided, saves the result to the database.
     """
     # Track overall timing
     overall_start = time.time()
     
     # Use provided session_id if available, else generate a new one
     session_id = set_session_id(session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}")
+    logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}, Patient Token: {patient_token_id}")
 
     if not audio.filename:
         logger.error(f"[{session_id}] No audio file provided.")
@@ -157,6 +159,24 @@ async def process_audio_api(
                 "total_time": round(total_time, 2)
             }
         }
+        
+        # Save SOAP record to database if patient_token_id is provided
+        if patient_token_id:
+            try:
+                # save SOAP record and upload audio file to Supabase storage
+                soap_record = save_soap_record(
+                    patient_token_id=patient_token_id,
+                    audio_file_name=audio.filename,
+                    audio_local_path=filepath,
+                    transcript=corrected_transcript,
+                    original_transcript=transcript if is_realtime_flag else None,
+                    soap_sections=soap_sections
+                )
+                response_data["soap_record_id"] = soap_record['id']
+                logger.info(f"[{session_id}] ✅ SOAP record saved to database with ID: {soap_record['id']}")
+            except Exception as db_error:
+                logger.error(f"[{session_id}] Warning: Failed to save SOAP record to database: {db_error}")
+                # Don't fail the API call if DB save fails - still return the processed data
         
         logger.info(f"[{session_id}] ⏹️ Process audio END. Success; sending response.")
         return JSONResponse(content=response_data, status_code=200)
@@ -517,3 +537,108 @@ async def logout(user: dict = Depends(get_current_user)):
         content={"status": "success", "message": "Logged out successfully"},
         status_code=200
     )
+
+
+
+
+@app.get("/patient/{patient_token_id}/soap_records")
+async def get_patient_soap_records_api(patient_token_id: str):
+    """
+    Get all SOAP records for a patient.
+    Returns a list of all medical notes with transcripts for the patient.
+    """
+    try:
+        records = get_patient_soap_records(patient_token_id)
+        voice_recordings = get_voice_recordings(patient_token_id)
+        
+        # Create a map of soap_record_id -> voice recording storage_path
+        voice_recording_map = {}
+        for vr in voice_recordings:
+            soap_record_id = vr.get('soap_record_id')
+            if soap_record_id:
+                voice_recording_map[soap_record_id] = vr.get('storage_path')
+        
+        # Structure records to include both SOAP and transcript
+        formatted_records = []
+        for record in records:
+            record_id = record.get("id")
+            storage_path = voice_recording_map.get(record_id, record.get("audio_file_name"))
+            formatted_records.append({
+                "id": record_id,
+                "patient_token_id": record.get("patient_token_id"),
+                "audio_file_name": record.get("audio_file_name"),
+                "storage_path": storage_path,  # Add storage path for playback
+                "transcript": record.get("transcript"),
+                "original_transcript": record.get("original_transcript"),
+                "soap_sections": record.get("soap_sections"),
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at")
+            })
+        return JSONResponse(
+            content={
+                "status": "success",
+                "patient_token_id": patient_token_id,
+                "soap_records": formatted_records,
+                "total_records": len(formatted_records)
+            },
+            status_code=200
+        )
+    except Exception as e:
+        logger.error(f"Error fetching SOAP records for patient {patient_token_id}: {e}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": str(e)
+            },
+            status_code=500
+        )
+
+
+@app.put("/soap_record/{record_id}")
+async def update_soap_record_api(record_id: int, payload: dict):
+    """
+    Update SOAP sections for an existing record.
+    Used when doctor edits the SOAP summary.
+    """
+    try:
+        from database.patient_db import update_soap_record
+        
+        soap_sections = payload.get('soap_sections', {})
+        
+        if not soap_sections:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "No SOAP sections provided"
+                },
+                status_code=400
+            )
+        
+        success = update_soap_record(record_id, soap_sections)
+        
+        if success:
+            return JSONResponse(
+                content={
+                    "status": "success",
+                    "message": f"SOAP record {record_id} updated successfully",
+                    "record_id": record_id
+                },
+                status_code=200
+            )
+        else:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "Failed to update SOAP record"
+                },
+                status_code=500
+            )
+    except Exception as e:
+        logger.error(f"Error updating SOAP record {record_id}: {e}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": str(e)
+            },
+            status_code=500
+        )
