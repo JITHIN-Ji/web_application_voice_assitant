@@ -80,6 +80,13 @@ async def process_audio_api(
     # Use provided session_id if available, else generate a new one
     session_id = set_session_id(session_id or str(uuid.uuid4())[:8])
     logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}, Patient Token: {patient_token_id}")
+    # Require a selected patient for processing in Doctor portal workflows.
+    # If no patient_token_id is provided, return an explicit error so the frontend
+    # can prompt the user to choose a patient first. This enforces the UI expectation
+    # that audio processing is done in context of a patient.
+    if not patient_token_id:
+        logger.warning(f"[{session_id}] Missing patient_token_id in request - rejecting.")
+        raise HTTPException(status_code=400, detail="Patient selection required. Please choose a patient before processing audio.")
 
     if not audio.filename:
         logger.error(f"[{session_id}] No audio file provided.")
