@@ -80,7 +80,7 @@ async def process_audio_api(
     
     session_id = set_session_id(session_id or str(uuid.uuid4())[:8])
     logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}, Patient Token: {patient_token_id}")
-    
+
     if not patient_token_id:
         logger.warning(f"[{session_id}] Missing patient_token_id in request - rejecting.")
         raise HTTPException(status_code=400, detail="Patient selection required. Please choose a patient before processing audio.")
