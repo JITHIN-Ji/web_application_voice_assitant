@@ -71,8 +71,8 @@ def send_email_schedule(details: str, user_email: str, email_content: str = None
         print(f"[DEBUG] SendGrid response status: {response.status_code}")
         print(f"[DEBUG] SendGrid response body: {response.body}")
         print(f"[DEBUG] SendGrid response headers: {response.headers}")
-        logger.info(f"✅ Email sent Successfully to {user_email}")
-        return {"status": "success", "message": f"Email sent to {user_email}"}
+        logger.info("✅ Email sent successfully")
+        return {"status": "success", "message": "Email sent successfully"}
     except Exception as e:
         # Try to show more detailed info for debugging (status, body, headers)
         logger.error(f"Failed to send email: {e}")

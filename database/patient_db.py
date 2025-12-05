@@ -16,6 +16,7 @@ from database.supabase_client import supabase
 
 import io
 import base64
+import hashlib
 from utils.crypto import (
     encrypt_text,
     decrypt_text,
@@ -33,12 +34,20 @@ def generate_token_id() -> str:
     return str(uuid.uuid4())
 
 
-def create_patient(name: str, address: str = '', phone_number: str = '', problem: str = '', user_email: str = '') -> Dict:
-    token_id = generate_token_id()
+def generate_user_id() -> str:
+    return str(uuid.uuid4())
+
+
+def create_patient(name: str, address: str = '', phone_number: str = '', problem: str = '', user_id: str = '') -> Dict:
+    """Create a patient linked to a logged user by `user_id`.
+
+    Note: `user_id` is required to associate patients with a logged user.
+    """
+    if not user_id:
+        raise ValueError('user_id is required to create a patient')
 
     payload = {
-        'token_id': token_id,
-        'user_email': user_email,
+        'user_id': user_id,
         'name': encrypt_text(name),
         'address': encrypt_text(address),
         'phone_number': encrypt_text(phone_number),
@@ -48,15 +57,16 @@ def create_patient(name: str, address: str = '', phone_number: str = '', problem
     if getattr(res, 'error', None):
         logger.error(f"Supabase create_patient error: {res.error}")
         raise Exception(res.error)
-    logger.info(f"Patient created with token_id: {token_id} for user: {user_email}")
-    payload['status'] = 'success'
-    return payload
+    logger.info(f"Patient created for user_id: {user_id}")
+    
+    data = (res.data or [None])[0]
+    return data or {**payload, 'status': 'success'}
 
 
-def get_all_patients(user_email: str = '') -> List[Dict]:
+def get_all_patients(user_id: str = '') -> List[Dict]:
     query = supabase.table('patients').select('*')
-    if user_email:
-        query = query.eq('user_email', user_email)
+    if user_id:
+        query = query.eq('user_id', user_id)
     res = query.order('created_at', desc=True).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase get_all_patients error: {res.error}")
@@ -78,19 +88,19 @@ def get_all_patients(user_email: str = '') -> List[Dict]:
     return rows
 
 
-def get_patient_by_token(token_id: str, user_email: str = '') -> Optional[Dict]:
-    res = supabase.table('patients').select('*').eq('token_id', token_id).limit(1).execute()
+def get_patient_by_id(patient_id: int, user_id: str = '') -> Optional[Dict]:
+    res = supabase.table('patients').select('*').eq('id', patient_id).limit(1).execute()
     if getattr(res, 'error', None):
-        logger.error(f"Supabase get_patient_by_token error: {res.error}")
+        logger.error(f"Supabase get_patient_by_id error: {res.error}")
         raise Exception(res.error)
     data = res.data or []
     patient = data[0] if data else None
+
     
-    # Check if user_email matches if provided
-    if patient and user_email and patient.get('user_email') != user_email:
-        logger.warning(f"User {user_email} attempted to access patient {token_id} belonging to {patient.get('user_email')}")
+    if patient and user_id and patient.get('user_id') != user_id:
+        logger.warning(f"User {user_id} attempted to access patient {patient_id} belonging to {patient.get('user_id')}")
         return None
-    
+
     if patient:
         try:
             if patient.get('name'):
@@ -106,7 +116,7 @@ def get_patient_by_token(token_id: str, user_email: str = '') -> Optional[Dict]:
     return patient
 
 
-def update_patient(token_id: str, name: str = None, address: str = None,
+def update_patient(patient_id: int, name: str = None, address: str = None,
                    phone_number: str = None, problem: str = None) -> bool:
     updates = {}
     if name is not None:
@@ -120,36 +130,35 @@ def update_patient(token_id: str, name: str = None, address: str = None,
     if not updates:
         return False
     updates['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
-    res = supabase.table('patients').update(updates).eq('token_id', token_id).execute()
+    res = supabase.table('patients').update(updates).eq('id', patient_id).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase update_patient error: {res.error}")
         raise Exception(res.error)
     return True
 
 
-def delete_patient(token_id: str) -> bool:
-    res = supabase.table('patients').delete().eq('token_id', token_id).execute()
+def delete_patient(patient_id: int) -> bool:
+    res = supabase.table('patients').delete().eq('id', patient_id).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase delete_patient error: {res.error}")
         raise Exception(res.error)
     return True
 
 
-def save_soap_record(patient_token_id: str, audio_file_name: str = None, audio_local_path: str = None,
+def save_soap_record(patient_id: int, audio_file_name: str = None, audio_local_path: str = None,
                      transcript: str = '', original_transcript: Optional[str] = None,
                      soap_sections: Optional[Dict] = None) -> Dict:
-    """Save a SOAP record and optionally upload audio to Supabase storage.
+    """Save a SOAP record linked to `patient_id` and optionally upload audio to Supabase storage.
 
     Returns inserted record dict (including id) and storage_path if uploaded.
     """
     storage_path = None
     try:
-        
         if audio_local_path and os.path.exists(audio_local_path):
             bucket = os.getenv('SUPABASE_STORAGE_BUCKET', )
             timestamp = int(time.time())
             filename = audio_file_name or os.path.basename(audio_local_path)
-            storage_path = f"{patient_token_id}/{timestamp}_{filename}"
+            storage_path = f"{patient_id}/{timestamp}_{filename}"
             with open(audio_local_path, 'rb') as f:
                 raw = f.read()
             try:
@@ -160,14 +169,13 @@ def save_soap_record(patient_token_id: str, audio_file_name: str = None, audio_l
             except Exception:
                 logger.exception('Failed to encrypt/upload audio file')
                 raise
-            
+
             if isinstance(upload_res, dict) and upload_res.get('error'):
                 logger.error(f"Supabase storage upload error: {upload_res.get('error')}")
                 raise Exception(upload_res.get('error'))
 
-        
         payload = {
-            'patient_token_id': patient_token_id,
+            'patient_id': patient_id,
             'audio_file_name': audio_file_name,
             'transcript': encrypt_text(transcript),
             'original_transcript': encrypt_text(original_transcript) if original_transcript is not None else None,
@@ -180,11 +188,11 @@ def save_soap_record(patient_token_id: str, audio_file_name: str = None, audio_l
         record = (res.data or [None])[0]
         if record is None:
             raise Exception('Failed to insert soap record')
-        
+
         if storage_path:
             rec_id = record.get('id')
             voice_payload = {
-                'patient_token_id': patient_token_id,
+                'patient_id': patient_id,
                 'soap_record_id': rec_id,
                 'storage_path': storage_path,
                 'file_name': audio_file_name or os.path.basename(audio_local_path),
@@ -194,7 +202,7 @@ def save_soap_record(patient_token_id: str, audio_file_name: str = None, audio_l
             if getattr(vres, 'error', None):
                 logger.error(f"Supabase insert voice_recordings error: {vres.error}")
         record['storage_path'] = storage_path
-        
+
         try:
             if record.get('transcript'):
                 record['transcript'] = decrypt_text(record.get('transcript'))
@@ -210,8 +218,8 @@ def save_soap_record(patient_token_id: str, audio_file_name: str = None, audio_l
         raise
 
 
-def get_patient_soap_records(patient_token_id: str) -> List[Dict]:
-    res = supabase.table('soap_records').select('*').eq('patient_token_id', patient_token_id).order('created_at', desc=True).execute()
+def get_patient_soap_records(patient_id: int) -> List[Dict]:
+    res = supabase.table('soap_records').select('*').eq('patient_id', patient_id).order('created_at', desc=True).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase get_patient_soap_records error: {res.error}")
         raise Exception(res.error)
@@ -229,8 +237,8 @@ def get_patient_soap_records(patient_token_id: str) -> List[Dict]:
     return rows
 
 
-def get_latest_soap_record(patient_token_id: str) -> Optional[Dict]:
-    records = get_patient_soap_records(patient_token_id)
+def get_latest_soap_record(patient_id: int) -> Optional[Dict]:
+    records = get_patient_soap_records(patient_id)
     return records[0] if records else None
 
 
@@ -244,25 +252,24 @@ def update_soap_record(record_id: int, soap_sections: Dict) -> bool:
     return True
 
 
-def save_voice_recording(patient_token_id: str, soap_record_id: int, file_path: str,
+def save_voice_recording(patient_id: int, soap_record_id: int, file_path: str,
                          file_name: str, is_realtime: bool = False) -> Dict:
     bucket = os.getenv('SUPABASE_STORAGE_BUCKET', 'recordings')
     timestamp = int(time.time())
-    storage_path = f"{patient_token_id}/{timestamp}_{file_name}"
+    storage_path = f"{patient_id}/{timestamp}_{file_name}"
     try:
-        
         with open(file_path, 'rb') as f:
             raw = f.read()
         enc_b64 = encrypt_bytes(raw)
         enc_bytes = base64.b64decode(enc_b64)
         upload_res = supabase.storage.from_(bucket).upload(storage_path, enc_bytes)
         logger.info(f"Uploaded audio file to Supabase storage: {storage_path}")
-        
+
         if isinstance(upload_res, dict) and upload_res.get('error'):
             logger.error(f"Supabase storage upload error: {upload_res.get('error')}")
             raise Exception(upload_res.get('error'))
         payload = {
-            'patient_token_id': patient_token_id,
+            'patient_id': patient_id,
             'soap_record_id': soap_record_id,
             'storage_path': storage_path,
             'file_name': file_name,
@@ -278,12 +285,75 @@ def save_voice_recording(patient_token_id: str, soap_record_id: int, file_path: 
         raise
 
 
-def get_voice_recordings(patient_token_id: str) -> List[Dict]:
-    res = supabase.table('voice_recordings').select('*').eq('patient_token_id', patient_token_id).order('created_at', desc=True).execute()
+def get_voice_recordings(patient_id: int) -> List[Dict]:
+    res = supabase.table('voice_recordings').select('*').eq('patient_id', patient_id).order('created_at', desc=True).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase get_voice_recordings error: {res.error}")
         raise Exception(res.error)
     return res.data or []
+
+
+def create_logged_user(email: str) -> Dict:
+    """Create a logged user record storing an encrypted email and returning the generated user id."""
+    user_id = generate_user_id()
+    
+    email_norm = (email or '').strip().lower()
+    email_hash = hashlib.sha256(email_norm.encode('utf-8')).hexdigest()
+    payload = {
+        'id': user_id,
+        'email': encrypt_text(email),
+        'email_hash': email_hash
+    }
+    res = supabase.table('logged_users').insert(payload).execute()
+    if getattr(res, 'error', None):
+        logger.error(f"Supabase create_logged_user error: {res.error}")
+        raise Exception(res.error)
+    logger.info(f"Logged user created with id: {user_id}")
+    data = (res.data or [None])[0]
+    return data or {**payload, 'status': 'success'}
+
+
+def get_logged_user(user_id: str) -> Optional[Dict]:
+    res = supabase.table('logged_users').select('*').eq('id', user_id).limit(1).execute()
+    if getattr(res, 'error', None):
+        logger.error(f"Supabase get_logged_user error: {res.error}")
+        raise Exception(res.error)
+    rows = res.data or []
+    user = rows[0] if rows else None
+    if user:
+        try:
+            if user.get('email'):
+                user['email'] = decrypt_text(user.get('email'))
+        except Exception:
+            logger.exception('Failed to decrypt logged user email')
+    return user
+
+
+def get_logged_user_by_email(email: str) -> Optional[Dict]:
+    """Lookup logged user by deterministic email hash (case-insensitive)."""
+    email_norm = (email or '').strip().lower()
+    email_hash = hashlib.sha256(email_norm.encode('utf-8')).hexdigest()
+    res = supabase.table('logged_users').select('*').eq('email_hash', email_hash).limit(1).execute()
+    if getattr(res, 'error', None):
+        logger.error(f"Supabase get_logged_user_by_email error: {res.error}")
+        raise Exception(res.error)
+    rows = res.data or []
+    user = rows[0] if rows else None
+    if user:
+        try:
+            if user.get('email'):
+                user['email'] = decrypt_text(user.get('email'))
+        except Exception:
+            logger.exception('Failed to decrypt logged user email')
+    return user
+
+
+def get_or_create_logged_user(email: str) -> Dict:
+    """Return existing logged user by email or create one if missing."""
+    existing = get_logged_user_by_email(email)
+    if existing:
+        return existing
+    return create_logged_user(email)
 
 
 

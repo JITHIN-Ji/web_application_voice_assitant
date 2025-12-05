@@ -21,7 +21,16 @@ from pipeline.core import MedicalAudioProcessor
 from agent.config import set_session_id, logger, GEMINI_API_KEY
 from agent.core import process_appointment
 from user.chat_service import process_user_question
-from database.patient_db import create_patient, get_all_patients, get_patient_by_token, save_soap_record, get_patient_soap_records, get_voice_recordings
+from database.patient_db import (
+    create_patient,
+    get_all_patients,
+    get_patient_by_id,
+    save_soap_record,
+    get_patient_soap_records,
+    get_voice_recordings,
+    get_logged_user_by_email,
+    create_logged_user,
+)
 from database.supabase_client import supabase
 from utils.crypto import decrypt_bytes
 
@@ -68,7 +77,7 @@ async def process_audio_api(
     audio: UploadFile = File(...),
     session_id: str = Form(None),
     is_realtime: str = Form(None), 
-    patient_token_id: str = Form(None)  
+    patient_id: int = Form(None)
 ):
     """
     Processes an uploaded audio file to generate a medical transcript and SOAP summary.
@@ -79,10 +88,10 @@ async def process_audio_api(
     
     
     session_id = set_session_id(session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}, Patient Token: {patient_token_id}")
+    logger.info(f"[{session_id}] ▶️ Process audio START. Filename: {audio.filename}, Patient ID: {patient_id}")
 
-    if not patient_token_id:
-        logger.warning(f"[{session_id}] Missing patient_token_id in request - rejecting.")
+    if not patient_id:
+        logger.warning(f"[{session_id}] Missing patient selection in request - rejecting.")
         raise HTTPException(status_code=400, detail="Patient selection required. Please choose a patient before processing audio.")
 
     if not audio.filename:
@@ -165,11 +174,11 @@ async def process_audio_api(
         }
         
         
-        if patient_token_id:
+        if patient_id:
             try:
                 
                 soap_record = save_soap_record(
-                    patient_token_id=patient_token_id,
+                    patient_id=patient_id,
                     audio_file_name=audio.filename,
                     audio_local_path=filepath,
                     transcript=corrected_transcript,
@@ -248,7 +257,7 @@ async def approve_plan_api(payload: dict):
                 results['appointment_sending'] = appointment_send_res
                 
                 if appointment_send_res["status"] == "success":
-                    logger.info(f"[{session_id}] ✅ Appointment email sent to {user_email}. (Time: {send_time:.2f}s)")
+                    logger.info(f"[{session_id}] ✅ Appointment email sent successfully. (Time: {send_time:.2f}s)")
                     results['message'] = "Plan approved and actions executed (including appointment email)."
                     
                     total_time = time.time() - overall_start
@@ -367,7 +376,7 @@ async def create_patient_api(payload: dict, user: dict = Depends(get_current_use
     """
     client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
     session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] Received request to create patient from user: {user['email']}")
+    logger.info(f"[{session_id}] Received request to create patient")
 
     name = payload.get('name', '').strip()
     address = payload.get('address', '').strip()
@@ -384,8 +393,10 @@ async def create_patient_api(payload: dict, user: dict = Depends(get_current_use
         )
 
     try:
-        patient = create_patient(name, address, phone_number, problem, user_email=user['email'])
-        logger.info(f"[{session_id}] Patient created: {patient['token_id']} for user: {user['email']}")
+        # Get logged user (already created at login)
+        logged = get_logged_user_by_email(user['email'])
+        patient = create_patient(name, address, phone_number, problem, user_id=logged['id'])
+        logger.info(f"[{session_id}] Patient created: {patient.get('id')}")
         
         return JSONResponse(
             content={
@@ -414,11 +425,12 @@ async def get_patients_api(user: dict = Depends(get_current_user), session_id: s
 
     client_session_id = session_id
     session_id_obj = set_session_id(client_session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id_obj}] Received request to get patients for user: {user['email']}")
+    logger.info(f"[{session_id_obj}] Received request to get patients")
 
     try:
-        patients = get_all_patients(user_email=user['email'])
-        logger.info(f"[{session_id_obj}] Retrieved {len(patients)} patients for user: {user['email']}")
+        logged = get_logged_user_by_email(user['email'])
+        patients = get_all_patients(user_id=logged['id'])
+        logger.info(f"[{session_id_obj}] Retrieved {len(patients)} patients")
         
         return JSONResponse(
             content={
@@ -438,16 +450,17 @@ async def get_patients_api(user: dict = Depends(get_current_user), session_id: s
         )
 
 
-@app.get("/patients/{token_id}")
-async def get_patient_api(token_id: str, user: dict = Depends(get_current_user)):
+@app.get("/patients/{patient_id}")
+async def get_patient_api(patient_id: int, user: dict = Depends(get_current_user)):
     """
     Get a patient by token ID (only if it belongs to the current user).
     """
     session_id = set_session_id(str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] Received request to get patient: {token_id} from user: {user['email']}")
+    logger.info(f"[{session_id}] Received request to get patient: {patient_id}")
 
     try:
-        patient = get_patient_by_token(token_id, user_email=user['email'])
+        logged = get_logged_user_by_email(user['email'])
+        patient = get_patient_by_id(patient_id, user_id=logged['id'])
         
         if not patient:
             return JSONResponse(
@@ -498,7 +511,10 @@ async def google_auth(payload: dict):
     
     jwt_token = create_jwt_token(user_data)
     
-    logger.info(f"[{session_id}] User authenticated: {user_data['email']}")
+    
+    create_logged_user(user_data['email'])
+    
+    logger.info(f"[{session_id}] User authenticated Sucessfully")
     
     return JSONResponse(
         content={
@@ -536,7 +552,7 @@ async def logout(user: dict = Depends(get_current_user)):
     """
     Logout endpoint (client should delete token).
     """
-    logger.info(f"User logged out: {user['email']}")
+    logger.info("User logged out successfully")
     return JSONResponse(
         content={"status": "success", "message": "Logged out successfully"},
         status_code=200
@@ -545,15 +561,16 @@ async def logout(user: dict = Depends(get_current_user)):
 
 
 
-@app.get("/patient/{patient_token_id}/soap_records")
-async def get_patient_soap_records_api(patient_token_id: str, user: dict = Depends(get_current_user)):
+@app.get("/patient/{patient_id}/soap_records")
+async def get_patient_soap_records_api(patient_id: int, user: dict = Depends(get_current_user)):
     """
     Get all SOAP records for a patient (only if it belongs to the current user).
     Returns a list of all medical notes with transcripts for the patient.
     """
     try:
-        # First check if patient belongs to the current user
-        patient = get_patient_by_token(patient_token_id, user_email=user['email'])
+        
+        logged = get_logged_user_by_email(user['email'])
+        patient = get_patient_by_id(patient_id, user_id=logged['id'])
         if not patient:
             return JSONResponse(
                 content={
@@ -563,8 +580,8 @@ async def get_patient_soap_records_api(patient_token_id: str, user: dict = Depen
                 status_code=404
             )
         
-        records = get_patient_soap_records(patient_token_id)
-        voice_recordings = get_voice_recordings(patient_token_id)
+        records = get_patient_soap_records(patient_id)
+        voice_recordings = get_voice_recordings(patient_id)
         
         
         voice_recording_map = {}
@@ -580,7 +597,7 @@ async def get_patient_soap_records_api(patient_token_id: str, user: dict = Depen
             storage_path = voice_recording_map.get(record_id, record.get("audio_file_name"))
             formatted_records.append({
                 "id": record_id,
-                "patient_token_id": record.get("patient_token_id"),
+                "patient_id": record.get("patient_id"),
                 "audio_file_name": record.get("audio_file_name"),
                 "storage_path": storage_path, 
                 "transcript": record.get("transcript"),
@@ -592,14 +609,14 @@ async def get_patient_soap_records_api(patient_token_id: str, user: dict = Depen
         return JSONResponse(
             content={
                 "status": "success",
-                "patient_token_id": patient_token_id,
+                "patient_id": patient_id,
                 "soap_records": formatted_records,
                 "total_records": len(formatted_records)
             },
             status_code=200
         )
     except Exception as e:
-        logger.error(f"Error fetching SOAP records for patient {patient_token_id}: {e}")
+        logger.error(f"Error fetching SOAP records for patient {patient_id}: {e}")
         return JSONResponse(
             content={
                 "status": "error",
