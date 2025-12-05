@@ -260,10 +260,13 @@ async def approve_plan_api(payload: dict):
                     logger.info(f"[{session_id}] Plan approved and actions executed successfully.")
                     return JSONResponse(content=results, status_code=200)
                 else:
-                    results['message'] = "Plan approved, but appointment email sending failed."
-                    logger.error(f"[{session_id}] Appointment email sending failed: {appointment_send_res.get('error')}")
+                    # Email sending failed - return error status to frontend
+                    error_message = appointment_send_res.get('error', 'Unknown email sending error')
+                    logger.error(f"[{session_id}] ❌ Appointment email sending FAILED: {error_message}")
+                    results['message'] = f"Failed to send email: {error_message}"
+                    results['appointment_sending'] = appointment_send_res
                     
-                    return JSONResponse(content=results, status_code=200)
+                    return JSONResponse(content=results, status_code=400)
             else:
                 results['message'] = "Plan approved. Email content generated for review; sending not requested."
                 total_time = time.time() - overall_start
@@ -358,13 +361,13 @@ async def user_chat_api(payload: dict):
 
 
 @app.post("/patients")
-async def create_patient_api(payload: dict):
+async def create_patient_api(payload: dict, user: dict = Depends(get_current_user)):
     """
-    Create a new patient record.
+    Create a new patient record for the current authenticated user.
     """
     client_session_id = payload.get('session_id') if isinstance(payload, dict) else None
     session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] Received request to create patient.")
+    logger.info(f"[{session_id}] Received request to create patient from user: {user['email']}")
 
     name = payload.get('name', '').strip()
     address = payload.get('address', '').strip()
@@ -381,8 +384,8 @@ async def create_patient_api(payload: dict):
         )
 
     try:
-        patient = create_patient(name, address, phone_number, problem)
-        logger.info(f"[{session_id}] Patient created: {patient['token_id']}")
+        patient = create_patient(name, address, phone_number, problem, user_email=user['email'])
+        logger.info(f"[{session_id}] Patient created: {patient['token_id']} for user: {user['email']}")
         
         return JSONResponse(
             content={
@@ -404,18 +407,18 @@ async def create_patient_api(payload: dict):
 
 
 @app.get("/patients")
-async def get_patients_api(session_id: str = None):
+async def get_patients_api(user: dict = Depends(get_current_user), session_id: str = None):
     """
-    Get all patients.
+    Get all patients for the current authenticated user.
     """
 
     client_session_id = session_id
-    session_id = set_session_id(client_session_id or str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] Received request to get all patients.")
+    session_id_obj = set_session_id(client_session_id or str(uuid.uuid4())[:8])
+    logger.info(f"[{session_id_obj}] Received request to get patients for user: {user['email']}")
 
     try:
-        patients = get_all_patients()
-        logger.info(f"[{session_id}] Retrieved {len(patients)} patients")
+        patients = get_all_patients(user_email=user['email'])
+        logger.info(f"[{session_id_obj}] Retrieved {len(patients)} patients for user: {user['email']}")
         
         return JSONResponse(
             content={
@@ -425,7 +428,7 @@ async def get_patients_api(session_id: str = None):
             status_code=200
         )
     except Exception as e:
-        logger.error(f"[{session_id}] Error getting patients: {e}", exc_info=True)
+        logger.error(f"[{session_id_obj}] Error getting patients: {e}", exc_info=True)
         return JSONResponse(
             content={
                 "status": "error",
@@ -436,21 +439,21 @@ async def get_patients_api(session_id: str = None):
 
 
 @app.get("/patients/{token_id}")
-async def get_patient_api(token_id: str):
+async def get_patient_api(token_id: str, user: dict = Depends(get_current_user)):
     """
-    Get a patient by token ID.
+    Get a patient by token ID (only if it belongs to the current user).
     """
     session_id = set_session_id(str(uuid.uuid4())[:8])
-    logger.info(f"[{session_id}] Received request to get patient: {token_id}")
+    logger.info(f"[{session_id}] Received request to get patient: {token_id} from user: {user['email']}")
 
     try:
-        patient = get_patient_by_token(token_id)
+        patient = get_patient_by_token(token_id, user_email=user['email'])
         
         if not patient:
             return JSONResponse(
                 content={
                     "status": "error",
-                    "message": "Patient not found."
+                    "message": "Patient not found or access denied."
                 },
                 status_code=404
             )
@@ -543,12 +546,23 @@ async def logout(user: dict = Depends(get_current_user)):
 
 
 @app.get("/patient/{patient_token_id}/soap_records")
-async def get_patient_soap_records_api(patient_token_id: str):
+async def get_patient_soap_records_api(patient_token_id: str, user: dict = Depends(get_current_user)):
     """
-    Get all SOAP records for a patient.
+    Get all SOAP records for a patient (only if it belongs to the current user).
     Returns a list of all medical notes with transcripts for the patient.
     """
     try:
+        # First check if patient belongs to the current user
+        patient = get_patient_by_token(patient_token_id, user_email=user['email'])
+        if not patient:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "Patient not found or access denied."
+                },
+                status_code=404
+            )
+        
         records = get_patient_soap_records(patient_token_id)
         voice_recordings = get_voice_recordings(patient_token_id)
         

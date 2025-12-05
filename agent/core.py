@@ -73,11 +73,23 @@ def process_appointment(plan_section: str, user_email: str, send_email: bool = T
                 content_to_send = custom_email_content if custom_email_content else email_content
                 email_result = send_email_schedule(appointment_text, user_email, email_content=content_to_send)
                 logger.info("📤 Email send attempted via SendGrid")
-                return {
-                    "status": "success",
-                    "result": email_result,
-                    "message": "Appointment email sent successfully"
-                }
+                
+                # Check if email sending was successful
+                if email_result.get("status") == "success":
+                    return {
+                        "status": "success",
+                        "result": email_result.get("message"),
+                        "message": "Appointment email sent successfully"
+                    }
+                else:
+                    # Email sending failed - return error status
+                    error_message = email_result.get("message", "Failed to send email")
+                    logger.error(f"Email sending failed: {error_message}")
+                    return {
+                        "status": "error",
+                        "error": error_message,
+                        "message": "Failed to send appointment email"
+                    }
 
         return {
             "status": "success",

@@ -33,11 +33,12 @@ def generate_token_id() -> str:
     return str(uuid.uuid4())
 
 
-def create_patient(name: str, address: str = '', phone_number: str = '', problem: str = '') -> Dict:
+def create_patient(name: str, address: str = '', phone_number: str = '', problem: str = '', user_email: str = '') -> Dict:
     token_id = generate_token_id()
 
     payload = {
         'token_id': token_id,
+        'user_email': user_email,
         'name': encrypt_text(name),
         'address': encrypt_text(address),
         'phone_number': encrypt_text(phone_number),
@@ -47,13 +48,16 @@ def create_patient(name: str, address: str = '', phone_number: str = '', problem
     if getattr(res, 'error', None):
         logger.error(f"Supabase create_patient error: {res.error}")
         raise Exception(res.error)
-    logger.info(f"Patient created with token_id: {token_id}")
+    logger.info(f"Patient created with token_id: {token_id} for user: {user_email}")
     payload['status'] = 'success'
     return payload
 
 
-def get_all_patients() -> List[Dict]:
-    res = supabase.table('patients').select('*').order('created_at', desc=True).execute()
+def get_all_patients(user_email: str = '') -> List[Dict]:
+    query = supabase.table('patients').select('*')
+    if user_email:
+        query = query.eq('user_email', user_email)
+    res = query.order('created_at', desc=True).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase get_all_patients error: {res.error}")
         raise Exception(res.error)
@@ -74,13 +78,19 @@ def get_all_patients() -> List[Dict]:
     return rows
 
 
-def get_patient_by_token(token_id: str) -> Optional[Dict]:
+def get_patient_by_token(token_id: str, user_email: str = '') -> Optional[Dict]:
     res = supabase.table('patients').select('*').eq('token_id', token_id).limit(1).execute()
     if getattr(res, 'error', None):
         logger.error(f"Supabase get_patient_by_token error: {res.error}")
         raise Exception(res.error)
     data = res.data or []
     patient = data[0] if data else None
+    
+    # Check if user_email matches if provided
+    if patient and user_email and patient.get('user_email') != user_email:
+        logger.warning(f"User {user_email} attempted to access patient {token_id} belonging to {patient.get('user_email')}")
+        return None
+    
     if patient:
         try:
             if patient.get('name'):

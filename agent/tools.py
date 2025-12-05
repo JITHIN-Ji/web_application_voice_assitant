@@ -3,7 +3,7 @@ import logging
 import pandas as pd
 import smtplib
 from email.mime.text import MIMEText
-from typing import List
+from typing import List, Dict
 import tempfile
 import shutil
 from typing import List, Dict, Any
@@ -44,18 +44,18 @@ def save_medicine_to_excel(medicines: List[str], filename="medicine_plan.xlsx") 
     logger.info(f"✅ Saved {len(medicines)} medicines to {file_path}")
     return f"Saved {len(medicines)} medicine records to {file_path}"
 
-def send_email_schedule(details: str, user_email: str, email_content: str = None) -> str:
+def send_email_schedule(details: str, user_email: str, email_content: str = None) -> Dict[str, str]:
     print(f"[DEBUG] EMAIL_ENABLED: {EMAIL_ENABLED}")
     print(f"[DEBUG] SENDGRID_API_KEY present: {bool(SENDGRID_API_KEY)}")
     
     if not EMAIL_ENABLED:
         logger.info("Email sending is disabled by EMAIL_ENABLED flag.")
         print("[DEBUG] Email sending is disabled by EMAIL_ENABLED flag.")
-        return "Email sending is disabled."
+        return {"status": "disabled", "message": "Email sending is disabled."}
     if not SENDGRID_API_KEY:
         logger.error("SendGrid API key not set.")
         print("[DEBUG] SendGrid API key not set.")
-        return "Email service not configured."
+        return {"status": "error", "message": "Email service not configured."}
     
     content_to_send = email_content if email_content else details
     
@@ -71,9 +71,27 @@ def send_email_schedule(details: str, user_email: str, email_content: str = None
         print(f"[DEBUG] SendGrid response status: {response.status_code}")
         print(f"[DEBUG] SendGrid response body: {response.body}")
         print(f"[DEBUG] SendGrid response headers: {response.headers}")
-        logger.info(f"✅ Email sent Sucessfully")
-        return f"Email sent to {user_email}"
+        logger.info(f"✅ Email sent Successfully to {user_email}")
+        return {"status": "success", "message": f"Email sent to {user_email}"}
     except Exception as e:
+        # Try to show more detailed info for debugging (status, body, headers)
         logger.error(f"Failed to send email: {e}")
+        error_detail = str(e)
+        try:
+            # Many SendGrid/HTTP client exceptions include response info
+            body = getattr(e, 'body', None)
+            status_code = getattr(e, 'status_code', None)
+            headers = getattr(e, 'headers', None)
+            if body:
+                print(f"[DEBUG] SendGrid error body: {body}")
+                error_detail = f"{error_detail} - Body: {body}"
+            if status_code:
+                print(f"[DEBUG] SendGrid error status_code: {status_code}")
+                error_detail = f"Status {status_code}: {error_detail}"
+            if headers:
+                print(f"[DEBUG] SendGrid error headers: {headers}")
+        except Exception:
+            # fallback to printing exception repr
+            print(f"[DEBUG] Exception repr: {repr(e)}")
         print(f"[DEBUG] Exception occurred: {e}")
-        return "Failed to send email."
+        return {"status": "error", "message": f"Failed to send email: {error_detail}"}
