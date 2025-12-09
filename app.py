@@ -13,7 +13,7 @@ import logging
 import base64
 import io
 from fastapi.responses import StreamingResponse
-
+from fastapi import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from auth.google_auth import verify_google_token, create_jwt_token, verify_jwt_token
 from auth.middleware import get_current_user, optional_auth
@@ -491,9 +491,9 @@ async def get_patient_api(patient_id: int, user: dict = Depends(get_current_user
 
 
 @app.post("/auth/google")
-async def google_auth(payload: dict):
+async def google_auth(payload: dict, response: Response):  
     """
-    Verify Google OAuth token and return JWT token.
+    Verify Google OAuth token and set JWT token in HTTP-only cookie.
     Expects: {"token": "google_oauth_token"}
     """
     session_id = set_session_id(str(uuid.uuid4())[:8])
@@ -512,22 +512,37 @@ async def google_auth(payload: dict):
     jwt_token = create_jwt_token(user_data)
     
     
-    create_logged_user(user_data['email'])
+    logger.info(f"[{session_id}] Google authentication succeeded for a user (PII omitted)")
+
     
-    logger.info(f"[{session_id}] User authenticated Sucessfully")
-    
-    return JSONResponse(
+    resp = JSONResponse(
         content={
             "status": "success",
-            "token": jwt_token,
             "user": {
                 "email": user_data['email'],
                 "name": user_data['name'],
                 "picture": user_data['picture']
             }
-        },
-        status_code=200
+        }
     )
+
+    resp.set_cookie(
+        key="auth_token",
+        value=jwt_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=86400,      
+        path='/'
+    )
+
+    
+    logger.info(f"[{session_id}] auth cookie set on response (HttpOnly=True, Secure={COOKIE_SECURE}, SameSite={COOKIE_SAMESITE})")
+
+    create_logged_user(user_data['email'])
+    logger.info(f"[{session_id}] User authenticated Successfully (login flow complete)")
+
+    return resp
 
 @app.get("/auth/verify")
 async def verify_auth(user: dict = Depends(get_current_user)):
@@ -548,15 +563,33 @@ async def verify_auth(user: dict = Depends(get_current_user)):
     )
 
 @app.post("/auth/logout")
-async def logout(user: dict = Depends(get_current_user)):
+async def logout(request: Request, response: Response):
     """
-    Logout endpoint (client should delete token).
+    Logout endpoint - deletes the HTTP-only cookie.
+
+    This endpoint no longer requires the authentication dependency so that a client
+    can perform logout even when the cookie is not (or cannot be) sent. The handler
+    logs whether the cookie was present but does not log any token or PII.
     """
-    logger.info("User logged out successfully")
-    return JSONResponse(
-        content={"status": "success", "message": "Logged out successfully"},
-        status_code=200
+
+    session_id = set_session_id(str(uuid.uuid4())[:8])
+
+    cookie_present = 'auth_token' in request.cookies
+    if cookie_present:
+        logger.info(f"[{session_id}] Logout requested; auth cookie present — deleting cookie (no token printed)")
+    else:
+        logger.info(f"[{session_id}] Logout requested; no auth cookie present. Proceeding to delete cookie on client.")
+
+    response.delete_cookie(
+        key="auth_token",
+        path='/'
     )
+
+    
+    logger.info(f"[{session_id}] Auth cookie deleted from response (logout) — no PII logged")
+
+    return JSONResponse(content={"status": "success", "message": "Logged out"}, status_code=200)
+
 
 
 
