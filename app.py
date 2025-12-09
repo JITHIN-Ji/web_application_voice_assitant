@@ -35,6 +35,12 @@ from database.supabase_client import supabase
 from utils.crypto import decrypt_bytes
 
 load_dotenv()
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://acucogn-voiceassitant-scribe.vercel.app')
+
+
+ENV = os.getenv('ENV', 'development')
+COOKIE_SAMESITE = 'none'  
+COOKIE_SECURE = True       
 
 app = FastAPI(
     title="Medical Audio Processor API",
@@ -45,11 +51,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=[FRONTEND_URL],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 @app.on_event("startup")
