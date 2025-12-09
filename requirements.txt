@@ -16,3 +16,7 @@ google-auth-httplib2==0.1.1
 PyJWT==2.8.0
 supabase
 cryptography
+pyodbc
+azure-storage-blob==12.24.0
+azure-identity==1.17.1
+azure-keyvault-secrets==4.8.0
