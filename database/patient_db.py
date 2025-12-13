@@ -13,7 +13,7 @@ import hashlib
 from azure.storage.blob import BlobServiceClient
 
 from database.azure_client import conn_str, blob_service_client
-from utils.crypto import (
+from utils.encryption import (
     encrypt_text,
     decrypt_text,
     encrypt_json,
@@ -266,7 +266,7 @@ def save_soap_record(patient_id: int, audio_file_name: str = None, audio_local_p
         record_id = result[0]
         conn.commit()
         
-        # Now fetch the complete record
+        
         cursor.execute("SELECT * FROM soap_records WHERE id = ?", (record_id,))
         row = cursor.fetchone()
         record = row_to_dict(cursor, row)
@@ -302,7 +302,7 @@ def save_soap_record(patient_id: int, audio_file_name: str = None, audio_local_p
         except Exception:
             logger.exception('Failed to decrypt soap record')
         
-        # Convert datetime fields
+        
         convert_datetime_fields(record)
         
         return record

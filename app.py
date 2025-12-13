@@ -3,7 +3,7 @@ import json
 import uuid
 import tempfile
 import time
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Cookie
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi import Request
 import mimetypes
@@ -13,9 +13,9 @@ import logging
 import base64
 import io
 from fastapi.responses import StreamingResponse
-
+from fastapi import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from auth.google_auth import verify_google_token, create_jwt_token, verify_jwt_token
+from auth.google_auth import verify_google_token, create_jwt_token, verify_jwt_token, create_refresh_token, verify_refresh_token
 from auth.middleware import get_current_user, optional_auth
 from pipeline.core import MedicalAudioProcessor
 from agent.config import set_session_id, logger, GEMINI_API_KEY
@@ -34,9 +34,15 @@ from database.patient_db import (
 )
 from database.azure_client import blob_service_client
 
-from utils.crypto import decrypt_bytes
+from utils.encryption import decrypt_bytes
 
 load_dotenv()
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://zealous-ground-07c2d0b10.3.azurestaticapps.net')
+
+
+ENV = os.getenv('ENV', 'development')
+COOKIE_SAMESITE = 'none'  
+COOKIE_SECURE = True       
 
 app = FastAPI(
     title="Medical Audio Processor API",
@@ -47,11 +53,61 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=[FRONTEND_URL],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_and_cache_headers(request: Request, call_next):
+    """Global middleware to add browser security headers and prevent client-side caching
+    of protected health information (PHI) for sensitive API endpoints.
+
+    - Adds common security headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+      Permissions-Policy). Enables HSTS when running in production.
+    - For sensitive paths or JSON API responses, sets Cache-Control: no-store and related headers
+      to ensure browsers and intermediate caches do not store PHI.
+    """
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    response.headers.setdefault("X-XSS-Protection", "0")
+
+
+    if ENV and ENV.lower() == "production":
+        
+        response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+
+    
+    sensitive_prefixes = (
+        "/process_audio",
+        "/download_audio",
+        "/patients",
+        "/patient",
+        "/soap_record",
+        "/auth",
+        "/approve_plan",
+        "/user_chat",
+    )
+
+    path = request.url.path or ""
+    content_type = (response.headers.get("content-type") or "").lower()
+
+    is_sensitive_path = any(path.startswith(p) for p in sensitive_prefixes)
+    is_json_response = "application/json" in content_type
+
+    
+    if is_sensitive_path or is_json_response:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+
+    return response
 
 
 @app.on_event("startup")
@@ -511,9 +567,9 @@ async def get_patient_api(patient_id: int, user: dict = Depends(get_current_user
 
 
 @app.post("/auth/google")
-async def google_auth(payload: dict):
+async def google_auth(payload: dict, response: Response):  
     """
-    Verify Google OAuth token and return JWT token.
+    Verify Google OAuth token and set JWT token and refresh token in HTTP-only cookies.
     Expects: {"token": "google_oauth_token"}
     """
     session_id = set_session_id(str(uuid.uuid4())[:8])
@@ -530,25 +586,50 @@ async def google_auth(payload: dict):
     
     
     jwt_token = create_jwt_token(user_data)
+    refresh_token = create_refresh_token(user_data)
     
     
-    create_logged_user(user_data['email'])
+    logger.info(f"[{session_id}] Google authentication succeeded for a user (PII omitted)")
+
     
-    logger.info(f"[{session_id}] User authenticated Sucessfully")
-    
-    return JSONResponse(
+    resp = JSONResponse(
         content={
             "status": "success",
-            "token": jwt_token,
             "user": {
                 "email": user_data['email'],
                 "name": user_data['name'],
                 "picture": user_data['picture']
             }
-        },
-        status_code=200
+        }
     )
 
+    resp.set_cookie(
+        key="auth_token",
+        value=jwt_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=86400,      
+        path='/'
+    )
+
+    resp.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=604800,    
+        path='/'
+    )
+
+    
+    logger.info(f"[{session_id}] auth and refresh cookies set on response (HttpOnly=True, Secure={COOKIE_SECURE}, SameSite={COOKIE_SAMESITE})")
+
+    create_logged_user(user_data['email'])
+    logger.info(f"[{session_id}] User authenticated Successfully (login flow complete)")
+
+    return resp
 @app.get("/auth/verify")
 async def verify_auth(user: dict = Depends(get_current_user)):
     """
@@ -568,17 +649,94 @@ async def verify_auth(user: dict = Depends(get_current_user)):
     )
 
 @app.post("/auth/logout")
-async def logout(user: dict = Depends(get_current_user)):
+async def logout(request: Request, response: Response):
     """
-    Logout endpoint (client should delete token).
+    Logout endpoint - deletes the HTTP-only cookie.
+
+    This endpoint no longer requires the authentication dependency so that a client
+    can perform logout even when the cookie is not (or cannot be) sent. The handler
+    logs whether the cookie was present but does not log any token or PII.
     """
-    logger.info("User logged out successfully")
-    return JSONResponse(
-        content={"status": "success", "message": "Logged out successfully"},
-        status_code=200
+
+    session_id = set_session_id(str(uuid.uuid4())[:8])
+
+    cookie_present = 'auth_token' in request.cookies
+    if cookie_present:
+        logger.info(f"[{session_id}] Logout requested; auth cookie present — deleting cookie (no token printed)")
+    else:
+        logger.info(f"[{session_id}] Logout requested; no auth cookie present. Proceeding to delete cookie on client.")
+
+    response.delete_cookie(
+        key="auth_token",
+        path='/'
     )
 
+    response.delete_cookie(
+        key="refresh_token",
+        path='/'
+    )
 
+    
+    logger.info(f"[{session_id}] Auth and refresh cookies deleted from response (logout) — no PII logged")
+
+    return JSONResponse(content={"status": "success", "message": "Logged out"}, status_code=200)
+
+
+@app.post("/auth/refresh")
+async def refresh_token_endpoint(response: Response, refresh_token: str = Cookie(None)):
+    """
+    Refresh the access token using the refresh token.
+    Expects refresh_token in HTTP-only cookie.
+    """
+    session_id = set_session_id(str(uuid.uuid4())[:8])
+    
+    if not refresh_token:
+        logger.info(f"[{session_id}] Token refresh attempted; no refresh token cookie found")
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token not found"
+        )
+    
+    logger.info(f"[{session_id}] Token refresh attempted; verifying refresh token (value omitted)")
+    
+    user_data = verify_refresh_token(refresh_token)
+    if not user_data:
+        logger.info(f"[{session_id}] Token refresh failed; refresh token invalid or expired")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired refresh token"
+        )
+    
+    
+    new_access_token = create_jwt_token({
+        'email': user_data['email'],
+        'name': user_data.get('name', ''),
+        'picture': user_data.get('picture', ''),
+        'sub': user_data['sub']
+    })
+    
+    logger.info(f"[{session_id}] Token refresh succeeded; new access token generated (value omitted)")
+    
+    resp = JSONResponse(
+        content={
+            "status": "success",
+            "message": "Token refreshed successfully"
+        }
+    )
+    
+    resp.set_cookie(
+        key="auth_token",
+        value=new_access_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=86400,      
+        path='/'
+    )
+    
+    logger.info(f"[{session_id}] New access token set in cookie")
+    
+    return resp
 
 
 @app.get("/patient/{patient_id}/soap_records")
