@@ -37,7 +37,16 @@ from database.azure_client import blob_service_client
 from utils.encryption import decrypt_bytes
 
 load_dotenv()
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://zealous-ground-07c2d0b10.3.azurestaticapps.net')
+FRONTEND_URLS_ENV = os.getenv('FRONTEND_URLS')
+FRONTEND_URL = os.getenv('FRONTEND_URL')
+
+if FRONTEND_URLS_ENV:
+    FRONTEND_URLS = [u.strip() for u in FRONTEND_URLS_ENV.split(',') if u.strip()]
+elif FRONTEND_URL:
+    FRONTEND_URLS = [FRONTEND_URL]
+else:
+    
+    FRONTEND_URLS = ['https://zealous-ground-07c2d0b10.3.azurestaticapps.net']
 
 
 ENV = os.getenv('ENV', 'development')
@@ -53,11 +62,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],  
+    allow_origins=FRONTEND_URLS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger.info(f"CORS configured to allow origins: {FRONTEND_URLS}")
 
 
 @app.middleware("http")
