@@ -46,7 +46,7 @@ elif FRONTEND_URL:
     FRONTEND_URLS = [FRONTEND_URL]
 else:
     
-    FRONTEND_URL = ['https://zealous-ground-07c2d0b10.3.azurestaticapps.net']
+    FRONTEND_URLS = ['https://zealous-ground-07c2d0b10.3.azurestaticapps.net']
 
 
 ENV = os.getenv('ENV', 'development')
